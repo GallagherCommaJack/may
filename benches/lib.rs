@@ -3,11 +3,58 @@
 
 #[macro_use]
 extern crate may;
+extern crate rand;
 extern crate test;
 
 use coroutine::*;
 use may::coroutine;
+use may::net::{TcpListener, TcpStream};
+use may::sync::mpsc;
+use rand::Rng;
+use std::io::{Read, Write};
+use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use test::Bencher;
+
+#[bench]
+fn tcp(b: &mut Bencher) {
+    may::config().set_workers(4).set_io_workers(4);
+    let mut rng = rand::thread_rng();
+    let mut socket = SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), rand::thread_rng().gen());
+    let mut iter = 0;
+    b.iter(move || {
+        let listener;
+        loop {
+            match TcpListener::bind(&socket) {
+                Ok(listen) => {
+                    listener = listen;
+                    break;
+                }
+                Err(_) => socket.set_port(rng.gen()),
+            }
+        }
+        let s2 = socket.clone();
+        let (sender, receiver) = mpsc::channel();
+        join!(
+            go!(move || {
+                for (i, stream) in listener.incoming().enumerate() {
+                    let mut stream = stream.expect("bad stream");
+                    go!(move || stream.read_exact(&mut [0u8]).expect("oy"));
+                }
+            }),
+            go!(move || {
+                for i in 0..1000 {
+                    let mut stream = TcpStream::connect(s2).expect("oof");
+                    go!(move || stream.write_all(&[0u8]).expect("failed to write"));
+                }
+                println!("handled streams: {:?}", iter);
+                sender.send(0u8).expect("failed to send");
+            })
+        );
+
+        iter += 1;
+        assert_eq!(receiver.recv().expect("failed to receive"), 0)
+    })
+}
 
 #[bench]
 fn yield_bench(b: &mut Bencher) {
